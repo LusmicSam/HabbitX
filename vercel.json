@@ -19,7 +19,7 @@
             "destination": "/server/index.js"
         },
         {
-            "source": "/((?!assets/.*|.*\\..*).*)",
+            "source": "/(.*)",
             "destination": "/index.html"
         }
     ],

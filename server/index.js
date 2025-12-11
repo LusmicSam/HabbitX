@@ -196,6 +196,12 @@ app.post('/api/profile/reset', requireAuth, async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+// Export for Vercel Serverless
+module.exports = app;
+
+// Only listen if running locally
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}

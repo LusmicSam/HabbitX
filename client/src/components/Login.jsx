@@ -39,7 +39,7 @@ const Login = () => {
                         <input
                             type="email"
                             required
-                            className="habit-input"
+                            className="auth-input"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
                         />
@@ -50,7 +50,7 @@ const Login = () => {
                         <input
                             type="password"
                             required
-                            className="habit-input"
+                            className="auth-input"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                         />

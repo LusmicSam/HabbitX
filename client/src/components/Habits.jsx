@@ -74,7 +74,7 @@ function Habits() {
 
         try {
             // Optimistic UI could be added here, but simplest is update then fetch
-            const response = await api.post(`/habits/${id}/toggle`, { isCompleted: habit.todayCompleted });
+            const response = await api.post(`/habits/${id}/toggle`, { isCompleted: !habit.todayCompleted });
 
             if (response.data.status === 'added') {
                 triggerConfetti();

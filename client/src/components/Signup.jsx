@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 const Signup = () => {
     const { signUp } = useAuth();
     const navigate = useNavigate();
+    const [username, setUsername] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -15,10 +16,10 @@ const Signup = () => {
         try {
             setError('');
             setLoading(true);
-            const { error } = await signUp({ email, password });
-            if (error) throw error;
-            alert('Registration successful! Check your email for verification if enabled, or sign in.');
-            navigate('/login');
+            const { error } = await signUp(username, email, password);
+            if (error) throw new Error(error);
+            // Sign up now automatically logs in and returns token/user
+            navigate('/');
         } catch (err) {
             setError('Failed to create account: ' + err.message);
         } finally {
@@ -35,6 +36,17 @@ const Signup = () => {
                 {error && <div className="error-alert">{error}</div>}
 
                 <form onSubmit={handleSubmit} className="auth-form">
+                    <div className="form-group">
+                        <label>Username</label>
+                        <input
+                            type="text"
+                            required
+                            className="habit-input"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
+                        />
+                    </div>
+
                     <div className="form-group">
                         <label>Email</label>
                         <input
@@ -58,7 +70,7 @@ const Signup = () => {
                     </div>
 
                     <button disabled={loading} type="submit" className="add-btn" style={{ position: 'static', width: '100%', padding: '12px', marginTop: '10px' }}>
-                        {loading ? 'Sign Up' : 'Create Account'}
+                        {loading ? 'Signing Up...' : 'Create Account'}
                     </button>
                 </form>
 

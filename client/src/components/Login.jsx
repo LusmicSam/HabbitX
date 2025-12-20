@@ -15,8 +15,8 @@ const Login = () => {
         try {
             setError('');
             setLoading(true);
-            const { error } = await signIn({ email, password });
-            if (error) throw error;
+            const { error } = await signIn(email, password);
+            if (error) throw new Error(error);
             navigate('/');
         } catch (err) {
             setError('Failed to sign in: ' + err.message);

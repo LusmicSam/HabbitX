@@ -1,71 +1,120 @@
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
-const { createClient } = require('@supabase/supabase-js');
+
+// Models
+const User = require('./models/User');
+const Profile = require('./models/Profile');
+const Habit = require('./models/Habit');
+const Badge = require('./models/Badge');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey_change_in_prod';
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
-// Supabase Setup
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+// Database Connection
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log('MongoDB Connected'))
+    .catch(err => console.error('MongoDB Connection Error:', err));
 
-// Helper to get authenticated client based on request token
-const getSupabase = (req) => {
+// --- Authentication Middleware ---
+const requireAuth = async (req, res, next) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader) return null;
-    const token = authHeader.replace('Bearer ', '');
-
-    return createClient(supabaseUrl, supabaseAnonKey, {
-        global: {
-            headers: { Authorization: `Bearer ${token}` }
-        }
-    });
-};
-
-// Middleware to check auth
-const requireAuth = (req, res, next) => {
-    const supabase = getSupabase(req);
-    if (!supabase) {
-        return res.status(401).json({ error: 'Missing Authorization header' });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing or invalid authorization token' });
     }
-    req.supabase = supabase;
-    next();
+
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = { id: decoded.userId }; // Attach minimal user info
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
 };
 
-// --- Routes ---
+// --- Auth Routes ---
 
-// Get Dashboard Data (Hybrid of Habits, Logs, and Profile)
+// Signup
+app.post('/api/auth/signup', async (req, res) => {
+    const { username, email, password } = req.body;
+    try {
+        // Check if user exists
+        const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+        if (existingUser) {
+            return res.status(400).json({ error: 'User already exists' });
+        }
+
+        // Create User
+        const user = await User.create({ username, email, password });
+
+        // Create initial Profile
+        await Profile.create({ userId: user._id });
+
+        // Generate Token
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+
+        res.status(201).json({ token, user: { id: user._id, username: user.username, email: user.email } });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Login
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    try {
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(400).json({ error: 'Invalid credentials' });
+        }
+
+        const isMatch = await user.comparePassword(password);
+        if (!isMatch) {
+            return res.status(400).json({ error: 'Invalid credentials' });
+        }
+
+        // Generate Token
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+
+        res.json({ token, user: { id: user._id, username: user.username, email: user.email } });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- App Routes (Protected) ---
+
+// Get Dashboard Data
 app.get('/api/dashboard', requireAuth, async (req, res) => {
     try {
-        // We need the user ID. We can get it from the user object via getUser
-        const { data: { user }, error: authError } = await req.supabase.auth.getUser();
-        if (authError || !user) return res.status(401).json({ error: 'Invalid token' });
+        const userId = req.user.id;
 
-        // Parallel fetch
-        const [profileReq, habitsReq, badgesReq] = await Promise.all([
-            req.supabase.from('profiles').select('*').eq('id', user.id).single(),
-            req.supabase.from('habits').select('*, habit_logs(completed_at)').order('created_at', { ascending: false }),
-            req.supabase.from('user_badges').select('*, badges(*)').eq('user_id', user.id)
-        ]);
+        // Parallel Fetch: Profile (Upsert), Habits
+        let profile = await Profile.findOne({ userId }).populate('earnedBadges');
+        // Fallback if profile missing (shouldn't happen with signup logic, but good for safety)
+        if (!profile) {
+            profile = await Profile.create({ userId });
+        }
 
-        if (habitsReq.error) throw habitsReq.error;
+        const habits = await Habit.find({ userId }).sort({ createdAt: -1 });
 
-        // Calculate Stats on Server
-        const habits = habitsReq.data;
+        // Calculate Stats
         const totalHabits = habits.length;
 
-        // Active streaks (completed today)
+        // Active Streaks (Completed Today)
         const today = new Date().toISOString().split('T')[0];
-        const activeStreaks = habits.filter(h => {
-            return h.habit_logs.some(l => l.completed_at === today);
-        }).length;
+        const activeStreaks = habits.filter(h => h.completedDates.includes(today)).length;
 
         // Weekly Chart Data
         const last7Days = Array.from({ length: 7 }, (_, i) => {
@@ -76,16 +125,16 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 
         const chartData = last7Days.map(date => {
             const count = habits.reduce((acc, h) => {
-                return acc + (h.habit_logs.some(l => l.completed_at === date) ? 1 : 0);
+                return acc + (h.completedDates.includes(date) ? 1 : 0);
             }, 0);
             return { day: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }), completed: count };
         });
 
         res.json({
-            profile: profileReq.data || { xp: 0, level: 1 },
+            profile,
             stats: { totalHabits, activeStreaks },
             chartData,
-            badges: badgesReq.data || []
+            badges: profile.earnedBadges || []
         });
 
     } catch (err) {
@@ -97,13 +146,19 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 // Get Habits
 app.get('/api/habits', requireAuth, async (req, res) => {
     try {
-        const { data, error } = await req.supabase
-            .from('habits')
-            .select('*, habit_logs(completed_at)')
-            .order('created_at', { ascending: false });
+        const habits = await Habit.find({ userId: req.user.id }).sort({ createdAt: -1 });
 
-        if (error) throw error;
-        res.json(data);
+        // Transform to match frontend expectation (Supabase shape)
+        const formattedHabits = habits.map(h => ({
+            id: h._id,
+            user_id: h.userId,
+            name: h.name,
+            icon: h.icon,
+            created_at: h.createdAt,
+            habit_logs: h.completedDates.map(date => ({ completed_at: date }))
+        }));
+
+        res.json(formattedHabits);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -113,14 +168,19 @@ app.get('/api/habits', requireAuth, async (req, res) => {
 app.post('/api/habits', requireAuth, async (req, res) => {
     const { name, icon } = req.body;
     try {
-        const { data: { user } } = await req.supabase.auth.getUser();
-        const { data, error } = await req.supabase
-            .from('habits')
-            .insert([{ user_id: user.id, name, icon }])
-            .select();
+        const newHabit = await Habit.create({
+            userId: req.user.id,
+            name,
+            icon
+        });
 
-        if (error) throw error;
-        res.json(data);
+        // Return structured like fetching for consistency (optional but helpful)
+        res.json({
+            id: newHabit._id,
+            name: newHabit.name,
+            icon: newHabit.icon,
+            completedDates: newHabit.completedDates
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -129,67 +189,68 @@ app.post('/api/habits', requireAuth, async (req, res) => {
 // Delete Habit
 app.delete('/api/habits/:id', requireAuth, async (req, res) => {
     try {
-        const { error } = await req.supabase
-            .from('habits')
-            .delete()
-            .match({ id: req.params.id });
-
-        if (error) throw error;
+        const result = await Habit.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+        if (!result) return res.status(404).json({ error: 'Habit not found' });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Toggle Habit (Complex Logic Moved to Server)
+// Toggle Habit
 app.post('/api/habits/:id/toggle', requireAuth, async (req, res) => {
     const { id } = req.params;
-    const { isCompleted } = req.body; // Client tells us current state, simpler
+    const { isCompleted } = req.body; // true = add, false = remove
     const today = new Date().toISOString().split('T')[0];
+    const userId = req.user.id;
 
     try {
+        const habit = await Habit.findOne({ _id: id, userId });
+        if (!habit) return res.status(404).json({ error: 'Habit not found' });
+
+        let xpChange = 0;
+
         if (isCompleted) {
-            // Untoggle
-            await req.supabase.from('habit_logs').delete().match({ habit_id: id, completed_at: today });
-            // Decrement XP
-            await updateXP(req.supabase, -10);
-            res.json({ status: 'removed' });
+            // Check if already completed to avoid double counting
+            if (!habit.completedDates.includes(today)) {
+                habit.completedDates.push(today);
+                await habit.save();
+                xpChange = 10;
+            }
         } else {
-            // Toggle
-            await req.supabase.from('habit_logs').insert({ habit_id: id, completed_at: today });
-            // Increment XP
-            const newLevel = await updateXP(req.supabase, 10);
-
-            // Check for badges (Simple server-side check)
-            // Note: Realistically we'd query streaks here, but keeping it simple for now
-
-            res.json({ status: 'added', newLevel });
+            // Remove
+            habit.completedDates = habit.completedDates.filter(d => d !== today);
+            await habit.save();
+            xpChange = -10;
         }
+
+        // Update Profile XP
+        const profile = await Profile.findOne({ userId });
+        if (profile && xpChange !== 0) {
+            profile.xp = Math.max(0, profile.xp + xpChange);
+            profile.level = Math.floor(profile.xp / 100) + 1;
+            await profile.save();
+        }
+
+        res.json({
+            status: isCompleted ? 'added' : 'removed',
+            newLevel: profile ? profile.level : 1
+        });
+
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: err.message });
     }
 });
 
-// Helper for XP
-async function updateXP(supabaseClient, amount) {
-    const { data: { user } } = await supabaseClient.auth.getUser();
-    const { data: profile } = await supabaseClient.from('profiles').select('xp, level').eq('id', user.id).single();
-
-    if (!profile) return null;
-
-    const newXP = Math.max(0, profile.xp + amount);
-    const newLevel = Math.floor(newXP / 100) + 1;
-
-    await supabaseClient.from('profiles').update({ xp: newXP, level: newLevel }).eq('id', user.id);
-    return newLevel;
-}
-
 // Reset Profile
 app.post('/api/profile/reset', requireAuth, async (req, res) => {
     try {
-        const { data: { user } } = await req.supabase.auth.getUser();
-        await req.supabase.from('profiles').update({ xp: 0, level: 1 }).eq('id', user.id);
+        await Profile.findOneAndUpdate(
+            { userId: req.user.id },
+            { xp: 0, level: 1 },
+            { upsert: true }
+        );
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
